@@ -269,6 +269,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryResponse) {
 		return
 	}
 	if len(rf.logs) - 1 < args.PrevLogIndex || rf.logs[args.PrevLogIndex] != args.PrevLogTerm {
+		rf.leaderLastTime = time.Now()
 		// Entry at previous log index has a different term to the leader, let's update our logs
 		reply.Term = int(rf.currentTerm)
 		reply.Success = false
@@ -406,6 +407,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf("I(%d) have been killed", rf.me)
+	rf.state = 1
 }
 
 func (rf *Raft) killed() bool {
@@ -437,7 +442,7 @@ func (rf *Raft) ticker() {
 		if rf.state != 0 {
 			rf.leaderLastTime = time.Now()
 			rand.Seed(time.Now().UnixNano())
-			sleepRandDuration := rand.Int31n(4000) + 500 // generate a random number from 1000 - 3000
+			sleepRandDuration := rand.Int31n(2000) + 500 // generate a random number from 1000 - 3000
 			sleepDuration := time.Millisecond * time.Duration(sleepRandDuration)
 			rf.sleepDuration = sleepDuration
 			// Kick of an election after timing out
@@ -514,6 +519,7 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) toString() string {
+	// return ""
 	return fmt.Sprintf("Raft server %d stat is \n current term -> %d \n votedFor -> %d \n state -> %d \n LeaderTime -> %d \n sleep -> %d", rf.me, rf.currentTerm, rf.votedFor, rf.state, time.Since(rf.leaderLastTime), rf.sleepDuration);
 }
 //
