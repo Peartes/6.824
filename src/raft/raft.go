@@ -19,6 +19,8 @@ package raft
 
 import (
 	//	"bytes"
+
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -70,6 +72,7 @@ type Raft struct {
 	applyChan chan ApplyMsg // channel for client to send apply msgs to
 	logs []int // client logs for this peer
 	leaderLastTime time.Time // last time we heard from the leader
+	sleepDuration time.Duration // How long before hosting an election?
 }
 
 // return currentTerm and whether this server
@@ -187,10 +190,10 @@ type AppendEntryResponse struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// DPrintf("Our server %d stat is %+v\n ", rf.me, rf)
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	DPrintf(rf.toString())
 
 	if rf.killed() {
 		reply.Term = int(rf.currentTerm)
@@ -205,7 +208,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	if rf.currentTerm == int64(args.Term) && rf.votedFor != rf.me {
+	if rf.currentTerm == int64(args.Term) && rf.state == 2 {
 		// I already voted for this term so rejecting this vote request
 		// DPrintf("rejecting server %d vote request for term %d because I server %d already voted for %d", args.CandidateId, args.Term, rf.me, rf.votedFor)
 		DPrintf("S[%d] X S[%d] T%d", rf.me, args.CandidateId, args.Term)
@@ -219,11 +222,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.state = 1
 		rf.currentTerm = int64(args.Term)
 		rf.votedFor = int(args.CandidateId)
+		rf.leaderLastTime = time.Now()
 		// reply with a passing vote
 		reply.Term = int(rf.currentTerm)
 		reply.VoteGranted = true
 		// DPrintf("vote request from server %d for term %d has a log term greater than ours %d so vote granted by server %d", args.CandidateId, args.Term, args.LastLogTerm, rf.me)
 		DPrintf("S[%d] -> S[%d] T%d", rf.me, args.CandidateId, args.Term)
+		DPrintf(rf.toString())
 		return
 	} else if args.LastLogTerm == rf.logs[len(rf.logs) - 1] {
 		if args.LastLogIndex >= len(rf.logs) {
@@ -231,11 +236,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.state = 1
 			rf.currentTerm = int64(args.Term)
 			rf.votedFor = int(args.CandidateId)
+			rf.leaderLastTime = time.Now()
 			// reply with a passing vote
 			reply.Term = int(rf.currentTerm)
 			reply.VoteGranted = true
 			// DPrintf("vote request from server %d for term %d has a log index greater than ours %d so vote granted by server %d ", args.CandidateId, args.Term, args.LastLogTerm, rf.me)
 			DPrintf("S[%d] -> S[%d] T%d", rf.me, args.CandidateId, args.Term)
+			DPrintf(rf.toString())
 			return
 		}
 	}
@@ -245,17 +252,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryResponse) {
-	DPrintf("Heartbeat to me(%d) by %d", rf.me, args.LeaderId)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	DPrintf("Heartbeat me(%d) <- %d", rf.me, args.LeaderId)
 
 	if rf.killed() {
 		reply.Term = int(rf.currentTerm)
 		reply.Success = false
 		return
 	}
-	// Reset heartbeat time
-	rf.leaderLastTime = time.Now()
 	if args.Term < int(rf.currentTerm) {
 		// Server is stale
 		reply.Term = int(rf.currentTerm)
@@ -267,10 +272,16 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryResponse) {
 		// Entry at previous log index has a different term to the leader, let's update our logs
 		reply.Term = int(rf.currentTerm)
 		reply.Success = false
+		DPrintf("Our Log is not up to date. We need log from leader")
 		return
 	}
 	reply.Success = true
 	reply.Term = int(rf.currentTerm)
+	rf.logs = append(rf.logs, int(rf.currentTerm))
+	// Reset heartbeat time
+	rf.leaderLastTime = time.Now()
+	DPrintf("I(%d) set timeout", rf.me)
+	DPrintf(rf.toString())
 	// TODO: Append the entry into the logs
 	// TODO: Implement commit update
 }
@@ -319,7 +330,7 @@ func (rf *Raft) sendHeartBeat() {
 		for !rf.killed() {
 			rf.mu.Lock()
 			if rf.state == 0 {
-				DPrintf("I(%d term %d lead send beat", rf.me, rf.currentTerm)
+				DPrintf("I(%d) term %d lead send beat", rf.me, rf.currentTerm)
 				rf.logs = append(rf.logs, int(rf.currentTerm))
 				rf.mu.Unlock()
 				for i := range rf.peers {
@@ -347,13 +358,10 @@ func (rf *Raft) sendHeartBeat() {
 					}
 				}
 				// TODO: Check for committing the entry from major response
-				rf.mu.Lock() 
-				defer rf.mu.Unlock()
-				if rf.state == 0 {
-					time.Sleep(time.Millisecond * 100)
-				}
+				time.Sleep(time.Millisecond * 100)
 			} else {
 				rf.mu.Unlock()
+				break
 			}
 		}
 	}()
@@ -415,12 +423,11 @@ func (rf *Raft) ticker() {
 		// if it is then we create and election
 		// if not we reset the sleep Duration
 		for {
-			time.Sleep(time.Millisecond * 300) // check for leader ping every 300ms
+			time.Sleep(time.Millisecond * 1000) // check for leader ping every 300ms
 			electionTimeoutCond.Broadcast()
 		}
 	}()
 	for !rf.killed() {
-
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
@@ -428,59 +435,65 @@ func (rf *Raft) ticker() {
 		// Once we are leader, we need not set an election timeout anymore
 		rf.mu.Lock()
 		if rf.state != 0 {
+			rf.leaderLastTime = time.Now()
 			rand.Seed(time.Now().UnixNano())
-			sleepRandDuration := rand.Int31n(2000) + 1000 // generate a random number from 1000 - 3000
+			sleepRandDuration := rand.Int31n(4000) + 500 // generate a random number from 1000 - 3000
 			sleepDuration := time.Millisecond * time.Duration(sleepRandDuration)
+			rf.sleepDuration = sleepDuration
 			// Kick of an election after timing out
 			for time.Since(rf.leaderLastTime) < sleepDuration {
-				// seems leader is still up
-				// reset our sleepDuration
-				sleepRandDuration = rand.Int31n(2000) + 1000 // generate a random number from 1000 - 3000
-				sleepDuration = time.Millisecond * time.Duration(sleepRandDuration)
+				DPrintf("I(%d) leader heartbeat %d", rf.me, time.Since(rf.leaderLastTime))
 				electionTimeoutCond.Wait() // release the lock
 			}
 			// We have not heard from the leader for a while, let's start an election
 			rf.currentTerm += 1
 			rf.state = 2
 			rf.votedFor = rf.me
-			// DPrintf("I(%d) am starting a new election for term %d because the last leader time was %d and my sleep timeout was %d", rf.me, rf.currentTerm, time.Since(rf.leaderLastTime), sleepDuration)
+			DPrintf("I(%d) am starting a new election", rf.me)
+			DPrintf(rf.toString())
 			DPrintf("I(%d) election [%d]", rf.me, rf.currentTerm)
-			rf.mu.Unlock()
 			numOfVote := 1 // number of votes
 			receivedVote := 1 // total number of received vote
 			cond := sync.NewCond(&rf.mu)
-	
+			
 			requestVote := &RequestVoteArgs{
 				int(rf.currentTerm),
 				int64(rf.me),
 				len(rf.logs),
 				rf.logs[len(rf.logs) - 1],
 			}
+			rf.mu.Unlock()
 			for i := range rf.peers {
 				if rf.me != i {
 					// let's not send a vote request to ourself
 					go func (i int) {
-						reply := &RequestVoteReply{}
-						rf.sendRequestVote(i, requestVote, reply)
 						rf.mu.Lock()
-						defer rf.mu.Unlock()
-						receivedVote++
-						if rf.currentTerm < int64(reply.Term) {
-							// another leader must have been elected
-							// step down and become a follower
-							DPrintf("seems my(%d) vote request for term %d was rejected becuase of a larger term entry of %d", rf.me, rf.currentTerm, reply.Term)
-							rf.currentTerm = int64(reply.Term)
-							rf.state = 1
-						} else if reply.VoteGranted {
-							DPrintf("I(%d) got sever %d vote for term %d", rf.me, i, rf.currentTerm)
-							numOfVote++
+						if rf.state == 2 {
+							rf.mu.Unlock()
+							reply := &RequestVoteReply{}
+							rf.sendRequestVote(i, requestVote, reply)
+							rf.mu.Lock()
+							defer rf.mu.Unlock()
+							receivedVote++
+							if rf.currentTerm < int64(reply.Term) {
+								// another leader must have been elected
+								// step down and become a follower
+								// DPrintf("seems my(%d) vote request for term %d was rejected becuase of a larger term entry of %d", rf.me, rf.currentTerm, reply.Term)
+								rf.currentTerm = int64(reply.Term)
+								rf.state = 1
+							} else if reply.VoteGranted {
+								// DPrintf("I(%d) got sever %d vote for term %d", rf.me, i, rf.currentTerm)
+								numOfVote++
+							}
+							cond.Broadcast()
+						} else {
+							rf.mu.Unlock()
 						}
-						cond.Broadcast()
 					}(i)
 				}
 			}
 			rf.mu.Lock()
-			for numOfVote < (len(rf.peers) / 2) + 1 && receivedVote < (len(rf.peers) / 2) + 1 && rf.state == 2 {
+			for numOfVote < len(rf.peers) / 2 + 1 && receivedVote < len(rf.peers) / 2 + 1 || rf.state != 2 {
 				// DPrintf("I(%d) havent received enough votes for term %d to make me leader. I have %d currently and have received %d so far", rf.me, rf.currentTerm, numOfVote, receivedVote)
 				cond.Wait()
 			}
@@ -489,15 +502,20 @@ func (rf *Raft) ticker() {
 				rf.state = 0
 				rf.mu.Unlock()
 				rf.sendHeartBeat()
-				DPrintf("we %d are leader for term %d ", rf.me, rf.currentTerm)
+				// DPrintf("we %d are leader for term %d ", rf.me, rf.currentTerm)
 			} else {
-				DPrintf("I(%d) lost term [%d]", rf.me, rf.currentTerm)
 				rf.mu.Unlock()
+				// DPrintf("I(%d) lost term [%d]", rf.me, rf.currentTerm)
 			}
+		} else {
+			rf.mu.Unlock()
 		}
 	}
 }
 
+func (rf *Raft) toString() string {
+	return fmt.Sprintf("Raft server %d stat is \n current term -> %d \n votedFor -> %d \n state -> %d \n LeaderTime -> %d \n sleep -> %d", rf.me, rf.currentTerm, rf.votedFor, rf.state, time.Since(rf.leaderLastTime), rf.sleepDuration);
+}
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
